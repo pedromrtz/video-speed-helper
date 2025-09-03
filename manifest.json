@@ -1,0 +1,27 @@
+{
+	"manifest_version": 3,
+	"name": "Video Speed Helper",
+	"version": "1.0.0",
+	"description": "Extra controls for HTML5 video: Shift+Arrows speed, Shift+R reset, Space hold-to-run at selected speed.",
+	"permissions": ["storage"],
+	"host_permissions": ["<all_urls>"],
+	"icons": {
+		"16": "icons/icon16.png",
+		"32": "icons/icon32.png",
+		"64": "icons/icon64.png",
+		"128": "icons/icon128.png"
+	},
+	"content_scripts": [
+		{
+			"matches": ["<all_urls>"],
+			"js": ["src/utils.js", "src/storage.js", "src/osd.js", "src/content_script.js"],
+			"css": ["src/content_styles.css"],
+			"all_frames": true,
+			"run_at": "document_idle"
+		}
+	],
+	"action": {
+		"default_title": "Video Speed Helper",
+		"default_popup": "popup/popup.html"
+	}
+}
