@@ -80,10 +80,16 @@
             border: 1px solid var(--border);
             border-radius: 12px;
         }
-        .site-info { display: flex; flex-direction: column; gap: 2px; }
+        .site-info { 
+            display: flex; 
+            flex-direction: column; 
+            gap: 2px; 
+            min-width: 0; /* Añadido para permitir que el texto se trunque */
+            flex: 1; /* Añadido para que ocupe el espacio disponible */
+        }
         .host {
             font-weight: 700;
-            max-width: 170px;
+            max-width: 100%; /* Cambiado a 100% para que respete el contenedor */
             overflow: hidden;
             text-overflow: ellipsis;
             white-space: nowrap;
@@ -91,7 +97,12 @@
         .muted { color: var(--muted); }
         .small { font-size: 12px; }
 
-        .toggle-wrap { display: flex; align-items: center; gap: 8px; }
+        .toggle-wrap { 
+            display: flex; 
+            align-items: center; 
+            gap: 8px; 
+            flex-shrink: 0; /* Añadido para evitar que se reduzca */
+        }
 
         /* state pill */
         .pill {
@@ -100,6 +111,7 @@
             font-size: 12px;
             border: 1px solid;
             user-select: none;
+            white-space: nowrap; /* Añadido para evitar salto de línea */
         }
         .pill-enabled {
             color: #bde1ff;
@@ -118,6 +130,7 @@
             display: inline-block;
             width: 48px;
             height: 26px;
+            flex-shrink: 0; /* Añadido para mantener tamaño fijo */
         }
         .switch input {
             position: absolute;
