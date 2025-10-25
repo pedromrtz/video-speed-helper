@@ -23,6 +23,9 @@ if (window.__vsh_injected) {
 		let last_known_rate = 1.0;
 		let active_videos = new Set();
 
+		// manually selected video (via click) gets priority
+		let manually_selected_video = null;
+
 		// space hold state
 		let is_space_holding = false;
 		let is_space_pressed = false;
@@ -67,6 +70,14 @@ if (window.__vsh_injected) {
 		const hook_video = (video) => {
 			if (!video || active_videos.has(video)) return;
 
+			console.log('[VSH] Hooking video:', {
+				src: video.src || video.currentSrc || 'no-src',
+				ready: video.readyState,
+				paused: video.paused,
+				size: `${video.videoWidth}x${video.videoHeight}`,
+				rect: video.getBoundingClientRect()
+			});
+
 			// init rate memory
 			if (!Number.isFinite(video.playbackRate)) {
 				video.playbackRate = 1.0;
@@ -76,39 +87,102 @@ if (window.__vsh_injected) {
 			// keep memory updated and show OSD on external changes
 			const on_rate_change = () => {
 				last_known_rate = video.playbackRate;
+				console.log(`[VSH] Rate changed externally to: ${last_known_rate}`);
 				show_osd_speed(last_known_rate, { sticky: is_space_holding }); // show indicator
 			};
 			video.addEventListener('ratechange', on_rate_change);
 
 			// cleanup on detach/reset
 			const on_remove = () => {
+				console.log('[VSH] Video removed from active set');
 				video.removeEventListener('ratechange', on_rate_change);
 				active_videos.delete(video);
 				video.removeEventListener('emptied', on_remove);
+				
+				// clear manual selection if this was the selected video
+				if (manually_selected_video === video) {
+					console.log('[VSH] Clearing manually selected video (was removed)');
+					manually_selected_video = null;
+				}
 			};
 			video.addEventListener('emptied', on_remove);
 
 			active_videos.add(video);
+			console.log(`[VSH] Total active videos: ${active_videos.size}`);
 		};
 
-		// find primary video (visible largest)
+		// find primary video (improved logic with manual selection priority)
 		const get_primary_video = () => {
 			const videos = Array.from(active_videos);
-			if (videos.length === 0) return null;
-			if (videos.length === 1) return videos[0];
+			
+			// debug logging (remove after testing)
+			if (videos.length > 0) {
+				console.log(`[VSH] Found ${videos.length} videos:`, videos.map(v => ({
+					src: v.src || v.currentSrc || 'no-src',
+					paused: v.paused,
+					ready: v.readyState,
+					size: `${v.videoWidth}x${v.videoHeight}`,
+					visible: v.getBoundingClientRect().width > 0,
+					manually_selected: v === manually_selected_video
+				})));
+			}
 
-			let best = null;
-			let best_area = -1;
-			for (const v of videos) {
-				const rect = v.getBoundingClientRect();
-				const area = Math.max(0, rect.width) * Math.max(0, rect.height);
-				const visible = area > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth;
-				if (visible && area > best_area) {
-					best = v;
-					best_area = area;
+			if (videos.length === 0) return null;
+			
+			// prioritize manually selected video if it's still active and valid
+			if (manually_selected_video && active_videos.has(manually_selected_video)) {
+				const rect = manually_selected_video.getBoundingClientRect();
+				const still_visible = rect.width > 0 && rect.height > 0;
+				if (still_visible) {
+					console.log(`[VSH] Using manually selected video:`, {
+						src: manually_selected_video.src || manually_selected_video.currentSrc || 'no-src'
+					});
+					return manually_selected_video;
+				} else {
+					// manually selected video is no longer visible, clear it
+					console.log('[VSH] Manually selected video no longer visible, clearing selection');
+					manually_selected_video = null;
 				}
 			}
-			return best || videos[0];
+
+			if (videos.length === 1) return videos[0];
+
+			// prioritize videos that are actually playing or ready to play
+			const playing_videos = videos.filter(v => !v.paused || v.readyState >= 2);
+			const target_videos = playing_videos.length > 0 ? playing_videos : videos;
+
+			let best = null;
+			let best_score = -1;
+
+			for (const v of target_videos) {
+				const rect = v.getBoundingClientRect();
+				const area = Math.max(0, rect.width) * Math.max(0, rect.height);
+				const visible = area > 0 && rect.bottom > 0 && rect.right > 0 && 
+					rect.top < window.innerHeight && rect.left < window.innerWidth;
+				
+				// scoring: prioritize visible, large, and ready videos
+				let score = 0;
+				if (visible) score += 1000;
+				if (v.readyState >= 2) score += 500; // has metadata
+				if (!v.paused) score += 200; // currently playing
+				if (v.videoWidth > 0 && v.videoHeight > 0) score += 100; // has dimensions
+				score += area; // size matters too
+
+				if (score > best_score) {
+					best = v;
+					best_score = score;
+				}
+			}
+
+			const result = best || videos[0];
+			console.log(`[VSH] Selected video:`, {
+				src: result.src || result.currentSrc || 'no-src',
+				paused: result.paused,
+				ready: result.readyState,
+				score: best_score
+			});
+
+			return result;
 		};
 
 		// apply playback rate with clamp
@@ -121,18 +195,26 @@ if (window.__vsh_injected) {
 		// bump helpers (keep OSD persistent if holding)
 		const bump_rate = (delta) => {
 			const v = get_primary_video();
-			if (!v) return;
+			if (!v) {
+				console.log('[VSH] No video for bump_rate');
+				return;
+			}
 			const base = is_space_holding ? v.playbackRate : last_known_rate;
 			const new_rate = set_rate(v, base + delta);
 			if (!is_space_holding) last_known_rate = new_rate;
+			console.log(`[VSH] Rate changed: ${base} -> ${new_rate} (delta: ${delta})`);
 			show_osd_speed(new_rate, { sticky: is_space_holding });
 		};
 
 		const reset_rate = () => {
 			const v = get_primary_video();
-			if (!v) return;
+			if (!v) {
+				console.log('[VSH] No video for reset_rate');
+				return;
+			}
 			const new_rate = set_rate(v, 1.0);
 			last_known_rate = new_rate;
+			console.log(`[VSH] Rate reset to ${new_rate}`);
 			show_osd_speed(new_rate, { sticky: is_space_holding });
 		};
 
@@ -165,14 +247,62 @@ if (window.__vsh_injected) {
 			show_osd_speed(new_rate); // non-sticky so it fades
 		};
 
-		// toggle play/pause (for space tap behavior)
+		// toggle play/pause (improved with fallbacks)
 		const toggle_play_pause = () => {
 			const v = get_primary_video();
-			if (!v) return;
+			if (!v) {
+				console.log('[VSH] No primary video found for play/pause');
+				return;
+			}
+			
 			try {
-				if (v.paused) v.play().catch(() => {});
-				else v.pause();
-			} catch (_) {}
+				console.log(`[VSH] Toggling play/pause on video (currently ${v.paused ? 'paused' : 'playing'})`);
+				if (v.paused) {
+					v.play().catch(err => console.log('[VSH] Play failed:', err));
+				} else {
+					v.pause();
+				}
+			} catch (err) {
+				console.log('[VSH] Toggle play/pause error:', err);
+			}
+		};
+
+		// handle click to manually select video player
+		const on_click = (e) => {
+			// search for videos within the clicked element and its parents
+			let current_element = e.target;
+			let videos_found = [];
+			
+			// search up the DOM tree from clicked element
+			while (current_element && current_element !== document.body && videos_found.length === 0) {
+				videos_found = find_videos_in_element(current_element);
+				if (videos_found.length === 0) {
+					current_element = current_element.parentElement;
+				}
+			}
+
+			if (videos_found.length > 0) {
+				// prefer videos that are ready/playing
+				const ready_videos = videos_found.filter(v => v.readyState >= 2);
+				const target_video = ready_videos.length > 0 ? ready_videos[0] : videos_found[0];
+				
+				// hook the video if not already hooked
+				if (!active_videos.has(target_video)) {
+					console.log('[VSH] Found new video via click, hooking it');
+					hook_video(target_video);
+				}
+				
+				// set as manually selected
+				manually_selected_video = target_video;
+				console.log(`[VSH] Manually selected video via click:`, {
+					src: target_video.src || target_video.currentSrc || 'no-src',
+					ready: target_video.readyState,
+					paused: target_video.paused
+				});
+				
+				// show a brief indicator
+				show_osd_speed(target_video.playbackRate, { sticky: false });
+			}
 		};
 
 		// fullscreen sync (keep OSD mounted in fullscreen element)
@@ -185,24 +315,32 @@ if (window.__vsh_injected) {
 		// keyboard handling (capture phase)
 		const on_key_down = (e) => {
 			// ignore typing and modifier conflicts
-			if (is_typing_context(e.target)) return;
+			if (is_typing_context(e.target)) {
+				console.log('[VSH] Ignoring key in typing context:', e.target.tagName);
+				return;
+			}
 			if (e.ctrlKey || e.altKey || e.metaKey) return;
 
+			const video_count = active_videos.size;
+			
 			// Shift combos
 			if (e.shiftKey) {
 				if (e.code === 'ArrowUp') {
+					console.log(`[VSH] Shift+Up pressed, ${video_count} videos active`);
 					e.preventDefault();
 					e.stopPropagation();
 					bump_rate(settings.step);
 					return;
 				}
 				if (e.code === 'ArrowDown') {
+					console.log(`[VSH] Shift+Down pressed, ${video_count} videos active`);
 					e.preventDefault();
 					e.stopPropagation();
 					bump_rate(-settings.step);
 					return;
 				}
 				if (e.code === 'KeyR') {
+					console.log(`[VSH] Shift+R pressed, ${video_count} videos active`);
 					e.preventDefault();
 					e.stopPropagation();
 					reset_rate();
@@ -212,6 +350,7 @@ if (window.__vsh_injected) {
 
 			// Space handling
 			if (e.code === 'Space') {
+				console.log(`[VSH] Space pressed, ${video_count} videos active`);
 				// intercept to decide tap vs hold
 				e.preventDefault();
 				e.stopPropagation();
@@ -223,7 +362,8 @@ if (window.__vsh_injected) {
 				clearTimeout(space_timer);
 				space_timer = setTimeout(() => {
 					if (is_space_pressed) {
-						start_space_hold().catch(() => {});
+						console.log('[VSH] Space hold detected');
+						start_space_hold().catch(err => console.log('[VSH] Start hold error:', err));
 					}
 				}, hold_threshold_ms);
 			}
@@ -231,6 +371,7 @@ if (window.__vsh_injected) {
 
 		const on_key_up = (e) => {
 			if (e.code === 'Space') {
+				console.log(`[VSH] Space released, was_holding: ${is_space_holding}, was_pressed: ${is_space_pressed}`);
 				e.preventDefault();
 				e.stopPropagation();
 
@@ -238,9 +379,11 @@ if (window.__vsh_injected) {
 
 				if (is_space_holding) {
 					// leaving boost: go to 1.0x and show OSD at 1x
+					console.log('[VSH] Ending space hold');
 					end_space_hold();
 				} else if (is_space_pressed) {
 					// quick tap: mimic default toggle
+					console.log('[VSH] Space tap detected - toggling play/pause');
 					toggle_play_pause();
 				}
 
@@ -258,20 +401,32 @@ if (window.__vsh_injected) {
 			// attach to existing and future videos
 			const stop_observer = observe_videos(hook_video);
 
-			// global listeners (capture)
-			window.addEventListener('keydown', on_key_down, true);
-			window.addEventListener('keyup', on_key_up, true);
+			// global listeners (capture) - wait for document if needed
+			const setup_listeners = () => {
+				window.addEventListener('keydown', on_key_down, true);
+				window.addEventListener('keyup', on_key_up, true);
 
-			// fullscreen listeners
-			document.addEventListener('fullscreenchange', on_fullscreen_change, true);
-			document.addEventListener('webkitfullscreenchange', on_fullscreen_change, true);
-			document.addEventListener('msfullscreenchange', on_fullscreen_change, true);
+				// fullscreen listeners
+				document.addEventListener('fullscreenchange', on_fullscreen_change, true);
+				document.addEventListener('webkitfullscreenchange', on_fullscreen_change, true);
+				document.addEventListener('msfullscreenchange', on_fullscreen_change, true);
 
-			// sync once in case we load already in fullscreen
-			on_fullscreen_change();
+				// sync once in case we load already in fullscreen
+				on_fullscreen_change();
 
-			// cleanup
-			window.addEventListener('unload', () => stop_observer());
+				// cleanup
+				window.addEventListener('unload', () => stop_observer());
+			};
+
+			// setup listeners when document is ready
+			if (document.readyState === 'loading') {
+				document.addEventListener('DOMContentLoaded', setup_listeners);
+			} else {
+				setup_listeners();
+			}
+
+			// add click listener for manual video selection (always active)
+			document.addEventListener('click', on_click, true);
 		};
 
 		init().catch(() => {});
